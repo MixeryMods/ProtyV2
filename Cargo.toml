@@ -3,7 +3,7 @@ name = "proty-v2"
 version = "0.4.0"
 edition = "2021"
 description = "Proty V2 — a chess engine whose handcrafted evaluation (tapered material + PSTs + bishop pair) is Texel-tuned on game results from the full modern elite corpus (GM/WGM/IM/WIM/FM/WFM/CM/WCM). No neural net, no engine labels. Anciency-style, modern data."
-license = "MIT"
+license = "GPL-3.0-or-later"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
