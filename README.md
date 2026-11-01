@@ -10,6 +10,12 @@ passed a match gate against the previous version (fixed-length
 ≥40-game, ≥55% gates through 0.4.0; SPRT from 0.5.0); anything that
 failed was reverted.
 
+A note on authorship, stated plainly: I'm a hobbyist, and a lot of
+this code was written with extensive AI assistance, under my
+direction. The design, the training pipeline, the gating rules and
+the decision of what ships are mine — the version history below is
+that record, including the changes that failed and got thrown out.
+
 UCI id: `Proty V2`. Just run the binary and talk UCI.
 
 ## Version mapping
