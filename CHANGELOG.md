@@ -5,6 +5,47 @@
 it passed a match gate against the previous version (fixed-length
 55% gates up to 0.4.0; SPRT from 0.5.0).
 
+## [0.8.0] — 2026-11-10 — Search pruning bundle
+
+Evaluation, book and tablebase support are identical to 0.7.5;
+only the search changed. This release takes the 0.8.0 number over
+the earlier king-attack-table experiment (gated 51.3%, cap, never
+shipped); that experiment is superseded and would need a new
+number if it is ever revived.
+
+### Added
+- Razoring at depths 1-3 (quiescence-verified).
+- Reverse futility pruning at depths 1-6.
+- Late move pruning for quiet moves at depths 1-4.
+- History malus: quiet moves that fail to cut lose the same
+  depth-squared history the cutting move gains.
+- History scaling between searches: the history table is halved
+  before each new search.
+- D3: transposition-table probe in quiescence (probe-only, plus
+  TT-move-first ordering there).
+
+### Changed
+- Futility pruning in the move loop extended from depths 1-2 to
+  depths 1-6 (same 150/depth margin; depths 1-2 unchanged).
+- Transposition table stores the full 64-bit Zobrist key per slot
+  and compares it directly (was a key-xor-data lock), with a
+  double-read guard against torn Lazy SMP writes.
+
+### Gate (vs 0.7.5, SPRT harness, 0.5s/move, 200-game cap)
+- CERTIFIED PASS: stopped at 120 games on the upper bound,
+  W64 D31 L25 = 66.2%, LLR +3.058 (bound +2.944). Roughly +117
+  Elo at this time control.
+- A first run was killed at exactly 100 games by a VM restart
+  (48.5%, LLR -0.421 at the kill); per the standing D2 precedent
+  the partial run counted for nothing and the gate was rerun
+  cleanly in full.
+- Regression green: cargo tests 14/14. Depth-12 startpos bench:
+  1,434,739 nodes vs 0.7.5's 2,574,931 (44% smaller tree).
+- Sanity record: the candidate still does not play Bxe3 in the
+  move-10 autopsy position (it now prefers Qb6, +14 at depth 16).
+  This bundle was search-only; the king-pressure blind spot is an
+  evaluation matter and remains open.
+
 ## [0.7.5] — 2026-11-01 — Warm-start retune on all-position data
 
 Commissioned after the Tjj7zv8v post-mortem (Proty misevaluated

@@ -5,6 +5,12 @@
 //! draw detection (fifty-move, insufficient material, repetition
 //! against the game history and the current search path).
 //!
+//! 0.8.0 additions: razoring (depths 1-3), reverse futility pruning
+//! (depths 1-6), futility pruning extended to depths 1-6, late move
+//! pruning (depths 1-4), a history malus for non-cutting quiet moves
+//! and history scaling between searches, full 64-bit TT keys, and a
+//! transposition-table probe in quiescence (D3).
+//!
 //! Clock handling hardened for Proty V2 (the Proty V1 lessons, applied
 //! from birth — V1's time-abort catastrophe must be unrepresentable):
 //!   * movetime is honoured even when a depth limit is also given
@@ -78,11 +84,16 @@ struct TtData {
 }
 
 /// Lockless transposition table shared by all Lazy SMP search
-/// threads (0.4.0). Each slot is two AtomicU64s in the Stockfish
-/// style: `keys[i]` holds `key ^ data` and `data[i]` the packed
-/// entry, so a probe that finds `keys[i] ^ data[i] == key` has read
-/// a consistent entry; a torn read simply misses. No locks anywhere
-/// near the search hot path.
+/// threads (0.4.0). Each slot is two AtomicU64s: `keys[i]` holds the
+/// FULL 64-bit Zobrist key of the entry (0.8.0: previously the slot
+/// held `key ^ data` and a probe verified the key only through that
+/// lock; the key is now stored and compared in full) and `data[i]`
+/// the packed entry. A probe reads the key, then the data, then the
+/// key again; if both key reads equal the probed key the entry is
+/// consistent, and a torn read simply misses. Stores write the data
+/// word before the key word so a racing probe that sees the new key
+/// almost always sees the new data too. No locks anywhere near the
+/// search hot path.
 pub struct SharedTt {
     keys: Vec<AtomicU64>,
     data: Vec<AtomicU64>,
@@ -103,20 +114,25 @@ impl SharedTt {
     }
 
     fn probe(&self, key: u64) -> Option<TtData> {
-        let idx = (key as usize) & self.mask;
-        let data = self.data[idx].load(Ordering::Relaxed);
-        if self.keys[idx].load(Ordering::Relaxed) ^ data == key {
-            Some(unpack_entry(data))
-        } else {
-            None
+        if key == 0 {
+            return None; // 0 is the empty-slot sentinel.
         }
+        let idx = (key as usize) & self.mask;
+        if self.keys[idx].load(Ordering::Relaxed) != key {
+            return None;
+        }
+        let data = self.data[idx].load(Ordering::Relaxed);
+        if self.keys[idx].load(Ordering::Relaxed) != key {
+            return None; // torn read: the slot changed under us.
+        }
+        Some(unpack_entry(data))
     }
 
     fn store(&self, key: u64, data: &TtData) {
         let idx = (key as usize) & self.mask;
         let packed = pack_entry(data);
         self.data[idx].store(packed, Ordering::Relaxed);
-        self.keys[idx].store(key ^ packed, Ordering::Relaxed);
+        self.keys[idx].store(key, Ordering::Relaxed);
     }
 }
 
@@ -336,6 +352,18 @@ impl Searcher {
             self.deadline = compute_deadline(pos, limits);
         }
         self.node_limit = limits.nodes;
+        // History scaling between searches (0.8.0): the butterfly
+        // history table persists across searches on this searcher,
+        // but move goodness from earlier positions goes stale as the
+        // game moves on. Halving every entry before each new search
+        // keeps recent evidence dominant without discarding the
+        // table outright. On the first search the table is all
+        // zeros, so this is a no-op.
+        for row in self.history.iter_mut() {
+            for h in row.iter_mut() {
+                *h /= 2;
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(d) = self.deadline {
             // Hard node failsafe for time-budgeted searches: 4096
@@ -613,6 +641,38 @@ impl Searcher {
             0
         };
 
+        // Razoring (0.8.0), depths 1-3: if the static eval is far
+        // below alpha, a full-width search is very unlikely to pull
+        // this node back to alpha. Drop straight to quiescence; if
+        // even quiescence beats alpha the position was sharper than
+        // the static eval suggested and the normal search runs.
+        if !in_check && ply > 0 && (1..=3).contains(&depth) && alpha.abs() < MATE - 1000 {
+            let margin = 200 + 150 * depth;
+            if static_eval + margin <= alpha {
+                let q = self.quiescence(pos, alpha, beta, ply, path);
+                if self.stopped {
+                    return 0;
+                }
+                if q <= alpha {
+                    return q;
+                }
+            }
+        }
+
+        // Reverse futility pruning (0.8.0), depths 1-6: if the
+        // static eval is above beta by a depth-scaled margin, the
+        // node is so good that even a bad move sequence is unlikely
+        // to drag it below beta, so the search can return early.
+        // Never in check, never at the root, never near mate scores.
+        if !in_check
+            && ply > 0
+            && (1..=6).contains(&depth)
+            && beta.abs() < MATE - 1000
+            && static_eval - 100 * depth >= beta
+        {
+            return static_eval;
+        }
+
         // Null-move pruning: if the static eval is already at or above
         // beta, test whether the position stays above beta even after
         // passing the move and searching at a reduced depth. If so,
@@ -660,6 +720,11 @@ impl Searcher {
         let mut best_move: Option<Move> = None;
         let mut flag = FLAG_UPPER;
         let mut moves_searched = 0usize;
+        // Quiet moves actually searched at this node, in order:
+        // the count drives late move pruning, and the list takes
+        // the history malus if a later quiet move cuts (0.8.0).
+        let mut quiet_moves_searched = 0usize;
+        let mut quiets_tried: Vec<(usize, usize)> = Vec::new();
         for m in ordered.drain(..) {
             let quiet = !m.is_capture() && !m.is_promotion();
             // SEE pruning (0.6.0 E1): at frontier depths, once at
@@ -683,19 +748,36 @@ impl Searcher {
                     continue;
                 }
             }
-            // Futility pruning at frontier depths: once at least one
-            // move has been searched, a quiet move whose static eval
-            // plus a generous margin still cannot reach alpha is
-            // skipped — it will not change this node's verdict.
+            // Late move pruning (0.8.0), depths 1-4: once enough
+            // quiet moves have been searched at a shallow node, the
+            // remaining quiet moves are skipped — this late in the
+            // ordering they almost never change the verdict.
+            // Captures and promotions are never pruned by it, and
+            // it never runs when the node is being mated.
+            if quiet
+                && (1..=4).contains(&depth)
+                && !in_check
+                && ply > 0
+                && best_score > -(MATE - 1000)
+                && quiet_moves_searched >= (3 + depth * depth) as usize
+            {
+                continue;
+            }
+            // Futility pruning in the move loop (extended in
+            // 0.8.0 from depths 1-2 to depths 1-6, margin still
+            // 150/depth so depths 1-2 behave exactly as before):
+            // once at least one move has been searched, a quiet
+            // move whose static eval plus the margin still cannot
+            // reach alpha is skipped — it will not change this
+            // node's verdict.
             if quiet
                 && moves_searched > 0
-                && depth <= 2
+                && (1..=6).contains(&depth)
                 && !in_check
                 && ply > 0
                 && alpha.abs() < MATE - 1000
             {
-                let margin = if depth == 1 { 150 } else { 300 };
-                if static_eval + margin <= alpha {
+                if static_eval + 150 * depth <= alpha {
                     continue;
                 }
             }
@@ -760,8 +842,21 @@ impl Searcher {
                         let h = &mut self.history[from as usize][to as usize];
                         *h += depth * depth;
                     }
+                    // History malus (0.8.0): every quiet move tried
+                    // earlier at this node failed to cut — push each
+                    // of them down by the same depth-squared amount
+                    // the cutting move was pushed up.
+                    for &(f, t) in &quiets_tried {
+                        self.history[f][t] -= depth * depth;
+                    }
                 }
                 break;
+            }
+            if quiet {
+                quiet_moves_searched += 1;
+                if let (Some(from), to) = (m.from(), m.to()) {
+                    quiets_tried.push((from as usize, to as usize));
+                }
             }
         }
 
@@ -787,7 +882,7 @@ impl Searcher {
         &mut self,
         pos: &Chess,
         mut alpha: i32,
-        beta: i32,
+        mut beta: i32,
         ply: usize,
         path: &mut Vec<u64>,
     ) -> i32 {
@@ -800,6 +895,33 @@ impl Searcher {
         }
         if pos.halfmoves() >= 100 || pos.is_insufficient_material() {
             return 0;
+        }
+        // D3 (0.8.0): probe the transposition table. Entries found
+        // here were stored by the main search at greater depth, so
+        // their bounds are at least as trustworthy as a fresh
+        // quiescence search: an exact entry, or a bound that closes
+        // the window, ends the node at once, and the stored best
+        // move is ordered first below. Probe-only — quiescence
+        // never stores, so the table is not flooded with shallow
+        // entries evicting real search results.
+        let key = key_of(pos);
+        let mut tt_move: Option<Move> = None;
+        if let Some(entry) = self.tt.probe(key) {
+            tt_move = entry.best.clone();
+            let mut s = entry.score;
+            if s > MATE - 1000 {
+                s -= ply as i32;
+            } else if s < -(MATE - 1000) {
+                s += ply as i32;
+            }
+            match entry.flag {
+                FLAG_EXACT => return s,
+                FLAG_LOWER => alpha = alpha.max(s),
+                _ => beta = beta.min(s),
+            }
+            if alpha >= beta {
+                return s;
+            }
         }
         let in_check = pos.is_check();
         let stand_pat = eval::evaluate_stm(pos, &self.params);
@@ -821,7 +943,14 @@ impl Searcher {
             .map(|m| {
                 // Order by the exchange value for captures (best
                 // first); bare promotions get queen-ish priority.
-                let s = if m.is_capture() { see(pos, m) } else { 900 };
+                // D3: the transposition table's move goes first.
+                let s = if Some(m) == tt_move.as_ref() {
+                    100_000_000
+                } else if m.is_capture() {
+                    see(pos, m)
+                } else {
+                    900
+                };
                 (s, m.clone())
             })
             .collect();

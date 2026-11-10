@@ -1,4 +1,4 @@
-# Proty V2 — 0.7.5
+# Proty V2 — 0.8.0
 
 A UCI chess engine forked from **Anciency** (handcrafted evaluation,
 alpha-beta search), with the evaluation **Texel-tuned on game results
@@ -29,7 +29,8 @@ UCI id: `Proty V2`. Just run the binary and talk UCI.
 | **0.5.0** | Phase D: bit-exact eval speed (D1) + SEE capture ordering (D2), SPRT-gated — file `proty-v2-0.5.0.zip` |
 | **0.6.0** | Phase E: search experiments — only E1 (SEE pruning) ships; E2/E3/E4 gated and reverted; 0.3.0 parameters unchanged — file `proty-v2-0.6.0.zip` |
 | **0.7.0** | Phase F: endgame — Syzygy tablebase probing (SyzygyPath, WDL in search, DTZ at the root) + two endgame scale factors; parameters and book unchanged — file `proty-v2-0.7.0.zip` |
-| **0.7.5** | Warm-start retune: 0.7.0 code unchanged; the 826 parameters re-polished from their shipped values on 9.12M all-position samples (sharp positions included), proximal leash mu = 1e-5, RMS drift 3.90 cp; gate vs 0.7.0: 58.5% over 200 games (LLR +2.127, cap — kept uncertified) — file `proty-v2-0.7.5.zip` (this build) |
+| **0.7.5** | Warm-start retune: 0.7.0 code unchanged; the 826 parameters re-polished from their shipped values on 9.12M all-position samples (sharp positions included), proximal leash mu = 1e-5, RMS drift 3.90 cp; gate vs 0.7.0: 58.5% over 200 games (LLR +2.127, cap — kept uncertified) — file `proty-v2-0.7.5.zip` |
+| **0.8.0** | Search pruning bundle: razoring (depths 1-3), reverse futility pruning (depths 1-6), futility extended to depths 1-6, late move pruning (depths 1-4), history malus + history scaling between searches, full 64-bit TT keys, quiescence TT probe (D3); evaluation unchanged from 0.7.5; gate vs 0.7.5: 66.2% over 120 games (LLR +3.058, SPRT accept H1 — certified) — file `proty-v2-0.8.0.zip` (this build) |
 
 ## The honest one-line summary
 
